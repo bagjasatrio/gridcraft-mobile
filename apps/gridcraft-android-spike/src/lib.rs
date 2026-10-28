@@ -29,8 +29,11 @@ pub struct SpikeApp {
     insets: WindowInsetsState,
     #[cfg(target_os = "android")]
     android_app: Option<winit::platform::android::activity::AndroidApp>,
+    #[cfg(target_os = "android")]
+    android_app_handle: Arc<Mutex<Option<winit::platform::android::activity::AndroidApp>>>,
     show_samples_menu: bool,
     last_saved_path: Option<String>,
+    was_editing: bool,
 }
 
 impl SpikeApp {
@@ -44,8 +47,41 @@ impl SpikeApp {
         }
 
         let inbox: Inbox = Arc::new(Mutex::new(Vec::new()));
+        let mem_clip = Arc::new(Mutex::new(String::new()));
+        let mem_clip_copy = mem_clip.clone();
+        let mem_clip_paste = mem_clip;
+
+        #[cfg(target_os = "android")]
+        let android_app_handle: Arc<Mutex<Option<winit::platform::android::activity::AndroidApp>>> = Arc::new(Mutex::new(None));
+        #[cfg(target_os = "android")]
+        let copy_app = android_app_handle.clone();
+        #[cfg(target_os = "android")]
+        let paste_app = android_app_handle.clone();
+
         let services = Services {
             inbox: Some(inbox.clone()),
+            copy_html: Some(Box::new(move |_html: &str, text: &str| {
+                *mem_clip_copy.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = text.to_string();
+                #[cfg(target_os = "android")]
+                if let Some(app) = &*copy_app.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+                    if let Err(e) = android_clipboard::set_clipboard_text(app, text) {
+                        log::warn!("clipboard copy jni error: {e}");
+                    }
+                }
+                Ok(())
+            })),
+            paste_text: Some(Box::new(move || {
+                #[cfg(target_os = "android")]
+                if let Some(app) = &*paste_app.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+                    if let Some(text) = android_clipboard::get_clipboard_text(app) {
+                        if !text.is_empty() {
+                            return Some(text);
+                        }
+                    }
+                }
+                let fallback = mem_clip_paste.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                if fallback.is_empty() { None } else { Some(fallback) }
+            })),
             download: Some(Box::new(|name: &str, bytes: &[u8]| {
                 let candidates = [
                     format!("/sdcard/Android/data/ai.storyteller.gridcraft.spike/files/{name}"),
@@ -82,8 +118,11 @@ impl SpikeApp {
             insets: WindowInsetsState::default(),
             #[cfg(target_os = "android")]
             android_app: None,
+            #[cfg(target_os = "android")]
+            android_app_handle,
             show_samples_menu: false,
             last_saved_path: None,
+            was_editing: false,
         }
     }
 
@@ -91,6 +130,7 @@ impl SpikeApp {
     fn with_android_app(mut self, app: winit::platform::android::activity::AndroidApp) -> Self {
         self.insets = android_insets::query_insets(&app);
         log::info!("system bar insets: top {} px, bottom {} px, ime={}", self.insets.top, self.insets.bottom, self.insets.ime_visible);
+        *self.android_app_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app.clone());
         self.android_app = Some(app);
         self
     }
@@ -126,48 +166,97 @@ impl SpikeApp {
         self.app.ui.status_bar = !(self.insets.ime_visible && is_landscape);
     }
 
-    /// Compact mobile quick action bar: Keyboard toggle, Zoom -/+, Open Samples, Save.
+    /// Compact mobile quick action bar: Keyboard/Edit toggle, Copy, Paste, Zoom, Open Samples, Save.
     fn mobile_toolbar(&mut self, ui: &mut egui::Ui) {
         let compact = ui.available_width() < 550.0;
+        let is_editing = self.app.editor.is_some();
+        let active_cell_a1 = self
+            .app
+            .session
+            .active()
+            .map(|d| d.selection.active.a1())
+            .unwrap_or_else(|| "A1".to_string());
+
         egui::Panel::top("android_mobile_toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.visuals_mut().button_frame = true;
 
-                // 1. Soft keyboard toggle
-                #[cfg(target_os = "android")]
-                {
-                    let kb_label = if compact { "⌨" } else { "⌨ Keyboard" };
-                    if ui.button(kb_label).clicked() {
+                // 1. Edit mode controls
+                if is_editing {
+                    let commit_btn = egui::Button::new(egui::RichText::new("✓ Done").color(egui::Color32::from_rgb(30, 160, 30)).strong());
+                    if ui.add(commit_btn).clicked() {
+                        self.app.commit_edit(0, 0, false, false);
+                        ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                    }
+                    let cancel_btn = egui::Button::new(egui::RichText::new("✗ Cancel").color(egui::Color32::from_rgb(200, 40, 40)));
+                    if ui.add(cancel_btn).clicked() {
+                        self.app.cancel_edit();
+                        ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                    }
+                } else {
+                    let edit_btn = if compact {
+                        format!("⌨ {active_cell_a1}")
+                    } else {
+                        format!("⌨ Edit {active_cell_a1}")
+                    };
+                    if ui.button(edit_btn).clicked() {
+                        self.app.begin_edit(None, false);
+                        if let Some(ed) = self.app.editor.as_mut() {
+                            ed.request_focus = true;
+                        }
+                        ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                        #[cfg(target_os = "android")]
                         if let Some(app) = &self.android_app {
                             android_ime::toggle_keyboard(app);
                         }
                     }
                 }
 
-                // 2. Zoom controls
+                ui.separator();
+
+                // 2. Clipboard controls (Copy & Paste)
+                let copy_label = if compact { "📋" } else { "📋 Copy" };
+                if ui.button(copy_label).clicked() {
+                    self.app.copy_to_clipboard(ui.ctx(), "edit.copy");
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                }
+
+                let paste_label = if compact { "📥" } else { "📥 Paste" };
+                if ui.button(paste_label).clicked() {
+                    self.app.paste_from_clipboard();
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                }
+
+                ui.separator();
+
+                // 3. Zoom controls
                 let zoom_out = if compact { "−" } else { "🔍 −" };
                 let zoom_in = if compact { "+" } else { "🔍 +" };
                 if ui.button(zoom_out).clicked() {
                     self.adjust_zoom(0.85);
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
                 if ui.button(zoom_in).clicked() {
                     self.adjust_zoom(1.15);
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
 
-                // 3. Save workbook button
+                // 4. Save workbook button
                 let save_label = if compact { "💾" } else { "💾 Save" };
                 if ui.button(save_label).clicked() {
                     self.save_current_workbook();
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
 
-                // 4. Samples / Open menu
-                let open_label = if compact { "📂 Open" } else { "📂 Samples / Open" };
+                // 5. Samples / Open menu
+                let open_label = if compact { "📂" } else { "📂 Open" };
                 if ui.button(open_label).clicked() {
                     self.show_samples_menu = !self.show_samples_menu;
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
 
                 if let Some(path) = &self.last_saved_path {
-                    let text = if compact { "✓ Saved".to_string() } else { format!("✓ Saved: {path}") };
+                    let text = if compact { "✓".to_string() } else { format!("✓ {path}") };
                     ui.label(egui::RichText::new(text).color(egui::Color32::GREEN).size(11.0));
                 }
             });
@@ -262,15 +351,25 @@ impl SpikeApp {
             });
     }
 
-    /// Handles pinch gesture for sheet zoom.
+    /// Handles pinch gesture for sheet zoom and auto-triggers soft input on edit.
     fn handle_gestures(&mut self, ui: &egui::Ui) {
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if (zoom_delta - 1.0).abs() > 0.02 {
             self.adjust_zoom(zoom_delta);
         }
 
+        // Auto-show soft keyboard when editor transitions to active
+        let is_editing = self.app.editor.is_some();
+        if is_editing && !self.was_editing {
+            #[cfg(target_os = "android")]
+            if let Some(app) = &self.android_app {
+                android_ime::toggle_keyboard(app);
+            }
+        }
+        self.was_editing = is_editing;
+
         // Auto-scroll active cell into visible area while editing or when keyboard is shown
-        if self.app.editor.is_some() || self.insets.ime_visible {
+        if is_editing || self.insets.ime_visible {
             self.app.grid.ensure_visible = true;
         }
     }
@@ -350,6 +449,66 @@ mod android_ime {
     pub fn toggle_keyboard(app: &AndroidApp) {
         log::info!("requesting AndroidApp::show_soft_input(false)");
         app.show_soft_input(false);
+    }
+}
+
+/// System clipboard bridge via Android ClipboardManager JNI.
+#[cfg(target_os = "android")]
+mod android_clipboard {
+    use jni::objects::{JObject, JValue};
+    use winit::platform::android::activity::AndroidApp;
+
+    pub fn set_clipboard_text(app: &AndroidApp, text: &str) -> Result<(), jni::errors::Error> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+        let mut env = vm.attach_current_thread()?;
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let service_name = env.new_string("clipboard")?;
+        let cm = env.call_method(&activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&service_name)])?.l()?;
+        if cm.is_null() {
+            return Ok(());
+        }
+        let label = env.new_string("GridCraft")?;
+        let text_jstr = env.new_string(text)?;
+        let clip_data = env.call_static_method(
+            "android/content/ClipData",
+            "newPlainText",
+            "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+            &[JValue::Object(&label), JValue::Object(&text_jstr)],
+        )?.l()?;
+        env.call_method(&cm, "setPrimaryClip", "(Landroid/content/ClipData;)V", &[JValue::Object(&clip_data)])?;
+        Ok(())
+    }
+
+    pub fn get_clipboard_text(app: &AndroidApp) -> Option<String> {
+        unsafe { get(app) }.unwrap_or_default()
+    }
+
+    unsafe fn get(app: &AndroidApp) -> Result<Option<String>, jni::errors::Error> {
+        let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }?;
+        let mut env = vm.attach_current_thread()?;
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let service_name = env.new_string("clipboard")?;
+        let cm = env.call_method(&activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&service_name)])?.l()?;
+        if cm.is_null() {
+            return Ok(None);
+        }
+        let has_clip = env.call_method(&cm, "hasPrimaryClip", "()Z", &[])?.z()?;
+        if !has_clip {
+            return Ok(None);
+        }
+        let clip = env.call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[])?.l()?;
+        if clip.is_null() {
+            return Ok(None);
+        }
+        let count = env.call_method(&clip, "getItemCount", "()I", &[])?.i()?;
+        if count <= 0 {
+            return Ok(None);
+        }
+        let item = env.call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)])?.l()?;
+        let char_seq = env.call_method(&item, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", &[JValue::Object(&activity)])?.l()?;
+        let jstr = env.call_method(&char_seq, "toString", "()Ljava/lang/String;", &[])?.l()?;
+        let rust_str: String = env.get_string(&jstr.into())?.into();
+        Ok(Some(rust_str))
     }
 }
 

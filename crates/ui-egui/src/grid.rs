@@ -2704,28 +2704,38 @@ fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &
         app.grid.drag_select = false;
     }
 
-    // Right-click: context menu.
-    if resp.secondary_clicked()
-        && let Some(p) = pos
+    // Right-click / Long-press: context menu (including right press that wobbles into a drag or touch hold).
+    let secondary_drag = resp.drag_started_by(egui::PointerButton::Secondary);
+    let long_pressed = pointer.primary_down()
+        && !resp.dragged()
+        && pointer.press_start_time().is_some_and(|t| ctx.input(|i| i.time) - t > 0.55);
+    if (resp.secondary_clicked() || secondary_drag || long_pressed)
+        && let Some(p) = if secondary_drag { pointer.press_origin().map(|p| geo.mirror_pos(p)).or(pos) } else { pos }
     {
-        if in_cells && !sel.contains(geo.cell_at(sh, p)) {
-            let _ = app.session.run("selection.set", json!({"cell": geo.cell_at(sh, p).a1()}));
-        }
-        if in_col_header || in_row_header {
-            let (rows, idx) = if in_row_header { (true, geo.row_at(sh, p.y)) } else { (false, geo.col_at(sh, p.x)) };
-            let inside = sel.ranges.iter().any(|r| {
-                if rows {
-                    r.is_full_rows() && idx >= r.start.row && idx <= r.end.row
-                } else {
-                    r.is_full_cols() && idx >= r.start.col && idx <= r.end.col
-                }
-            });
+        let selected_cols = sel.ranges.iter().any(|r| r.is_full_cols());
+        let selected_rows = sel.ranges.iter().any(|r| r.is_full_rows());
+        if in_col_header || (selected_cols && !selected_rows && in_cells) {
+            let idx = geo.col_at(sh, p.x);
+            let inside = sel.ranges.iter().any(|r| r.is_full_cols() && idx >= r.start.col && idx <= r.end.col);
             if !inside {
-                let range = if rows { RangeRef::rows(idx, idx) } else { RangeRef::cols(idx, idx) };
+                let range = RangeRef::cols(idx, idx);
                 let _ = app.session.run("selection.set", json!({"range": range.a1()}));
             }
-            app.grid.header_menu = Some((geo.mirror_pos(p), rows));
+            app.grid.header_menu = Some((geo.mirror_pos(p), false));
+            app.grid.context_menu_frame = ui.ctx().cumulative_frame_nr();
+        } else if in_row_header || (selected_rows && !selected_cols && in_cells) {
+            let idx = geo.row_at(sh, p.y);
+            let inside = sel.ranges.iter().any(|r| r.is_full_rows() && idx >= r.start.row && idx <= r.end.row);
+            if !inside {
+                let range = RangeRef::rows(idx, idx);
+                let _ = app.session.run("selection.set", json!({"range": range.a1()}));
+            }
+            app.grid.header_menu = Some((geo.mirror_pos(p), true));
+            app.grid.context_menu_frame = ui.ctx().cumulative_frame_nr();
         } else {
+            if in_cells && !sel.contains(geo.cell_at(sh, p)) {
+                let _ = app.session.run("selection.set", json!({"cell": geo.cell_at(sh, p).a1()}));
+            }
             app.grid.context_menu = Some(geo.mirror_pos(p));
             app.grid.context_menu_frame = ui.ctx().cumulative_frame_nr();
         }
@@ -2929,9 +2939,11 @@ fn paint_freeze_handles(p: &Painter, geo: &Geo, sh: &Sheet, drag: &Drag, t: &Tok
 
 fn col_edge(geo: &Geo, sh: &Sheet, x: f32) -> Option<(u32, f32)> {
     let c = geo.col_at(sh, x);
+    let tol = (10.0 * geo.z).clamp(8.0, 14.0);
     for cc in [c, c.saturating_sub(1)] {
         let edge = geo.x(sh, cc) + sh.col_width(cc) * geo.z;
-        if (x - edge).abs() <= 4.0 {
+        let max_tol = (sh.col_width(cc) * geo.z * 0.35).min(tol);
+        if (x - edge).abs() <= max_tol.max(4.0) {
             return Some((cc, edge));
         }
     }
@@ -2940,9 +2952,11 @@ fn col_edge(geo: &Geo, sh: &Sheet, x: f32) -> Option<(u32, f32)> {
 
 fn row_edge(geo: &Geo, sh: &Sheet, y: f32) -> Option<(u32, f32)> {
     let r = geo.row_at(sh, y);
+    let tol = (10.0 * geo.z).clamp(8.0, 14.0);
     for rr in [r, r.saturating_sub(1)] {
         let edge = geo.y(sh, rr) + sh.row_height(rr) * geo.z;
-        if (y - edge).abs() <= 3.0 {
+        let max_tol = (sh.row_height(rr) * geo.z * 0.35).min(tol);
+        if (y - edge).abs() <= max_tol.max(3.0) {
             return Some((rr, edge));
         }
     }
@@ -3284,7 +3298,16 @@ fn in_cell_editor(app: &mut SheetApp, ui: &mut egui::Ui, geo: &Geo, sh: &Sheet, 
 /// Test the popup itself, not whether the pointer is over any part of the app.
 /// A trigger can sit outside its popup, so its opening click must be ignored.
 fn popup_dismissed(response: &egui::Response, was_open: bool) -> bool {
-    response.ctx.input(|i| !i.focused || i.key_pressed(egui::Key::Escape)) || (was_open && response.clicked_elsewhere())
+    let esc = response.ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let clicked_outside = was_open && response.clicked_elsewhere();
+    #[cfg(target_os = "android")]
+    {
+        esc || clicked_outside
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        (was_open && response.ctx.input(|i| !i.focused)) || esc || clicked_outside
+    }
 }
 
 /// Black or white, whichever reads on `fill` (the threshold chart labels use).
