@@ -183,6 +183,36 @@ impl SpikeApp {
 
                 // 1. Edit mode controls
                 if is_editing {
+                    // Mobile interactive formula / text edit input
+                    let mut ed_text = self.app.editor.as_ref().map(|e| e.text.clone()).unwrap_or_default();
+                    let field_w = (ui.available_width() - 200.0).clamp(80.0, 260.0);
+                    let edit_field = egui::TextEdit::singleline(&mut ed_text)
+                        .hint_text("Enter formula or text...")
+                        .desired_width(field_w);
+                    if ui.add(edit_field).changed()
+                        && let Some(ed) = self.app.editor.as_mut() {
+                        ed.text = ed_text;
+                        ed.caret = ed.text.chars().count();
+                    }
+
+                    // Quick formula chips
+                    if ui.button("=").clicked()
+                        && let Some(ed) = self.app.editor.as_mut()
+                        && !ed.text.starts_with('=') {
+                        ed.text.insert(0, '=');
+                        ed.caret += 1;
+                    }
+                    if ui.button("+").clicked()
+                        && let Some(ed) = self.app.editor.as_mut() {
+                        ed.text.push('+');
+                        ed.caret = ed.text.chars().count();
+                    }
+                    if ui.button("SUM").clicked()
+                        && let Some(ed) = self.app.editor.as_mut() {
+                        ed.text = "=SUM(".to_string();
+                        ed.caret = ed.text.chars().count();
+                    }
+
                     let commit_btn = egui::Button::new(egui::RichText::new("✓ Done").color(egui::Color32::from_rgb(30, 160, 30)).strong());
                     if ui.add(commit_btn).clicked() {
                         self.app.commit_edit(0, 0, false, false);
@@ -214,7 +244,32 @@ impl SpikeApp {
 
                 ui.separator();
 
-                // 2. Clipboard controls (Copy & Paste)
+                // 2. Context Menu trigger button (⋯ Menu)
+                let menu_btn = if compact { "⋯" } else { "⋯ Menu" };
+                if ui.button(menu_btn).clicked() {
+                    let sel = self.app.session.active().map(|d| d.selection.clone()).unwrap_or_default();
+                    let center_pos = egui::pos2(ui.available_width() * 0.5, 260.0);
+                    if sel.ranges.iter().any(|r| r.is_full_cols()) {
+                        self.app.grid.header_menu = Some((center_pos, false));
+                    } else if sel.ranges.iter().any(|r| r.is_full_rows()) {
+                        self.app.grid.header_menu = Some((center_pos, true));
+                    } else {
+                        self.app.grid.context_menu = Some(center_pos);
+                    }
+                    self.app.grid.context_menu_frame = ui.ctx().cumulative_frame_nr();
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                }
+
+                // 3. Pan vs Select mode toggle (Bug 3)
+                let drag_mode_btn = if self.app.grid.drag_select { "✥ Select" } else { "✋ Pan" };
+                if ui.button(drag_mode_btn).clicked() {
+                    self.app.grid.drag_select = !self.app.grid.drag_select;
+                    ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
+                }
+
+                ui.separator();
+
+                // 4. Clipboard controls (Copy & Paste)
                 let copy_label = if compact { "📋" } else { "📋 Copy" };
                 if ui.button(copy_label).clicked() {
                     self.app.copy_to_clipboard(ui.ctx(), "edit.copy");
@@ -229,7 +284,7 @@ impl SpikeApp {
 
                 ui.separator();
 
-                // 3. Zoom controls
+                // 5. Zoom controls
                 let zoom_out = if compact { "−" } else { "🔍 −" };
                 let zoom_in = if compact { "+" } else { "🔍 +" };
                 if ui.button(zoom_out).clicked() {
@@ -241,14 +296,14 @@ impl SpikeApp {
                     ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
 
-                // 4. Save workbook button
+                // 6. Save workbook button
                 let save_label = if compact { "💾" } else { "💾 Save" };
                 if ui.button(save_label).clicked() {
                     self.save_current_workbook();
                     ui.ctx().memory_mut(|m| m.surrender_focus(ui.scope_id()));
                 }
 
-                // 5. Samples / Open menu
+                // 7. Samples / Open menu
                 let open_label = if compact { "📂" } else { "📂 Open" };
                 if ui.button(open_label).clicked() {
                     self.show_samples_menu = !self.show_samples_menu;
@@ -444,11 +499,57 @@ mod android_insets {
 /// Soft keyboard (IME) control via AndroidApp.
 #[cfg(target_os = "android")]
 mod android_ime {
+    use jni::objects::{JObject, JValue};
     use winit::platform::android::activity::AndroidApp;
 
+    pub fn show_keyboard(app: &AndroidApp) {
+        log::info!("requesting IME show via toggleSoftInput");
+        let vm = match unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) } {
+            Ok(vm) => vm,
+            Err(e) => {
+                log::warn!("JavaVM error: {e}");
+                return;
+            }
+        };
+        let mut env = match vm.attach_current_thread() {
+            Ok(env) => env,
+            Err(e) => {
+                log::warn!("attach thread error: {e}");
+                return;
+            }
+        };
+        let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+        let service_name = match env.new_string("input_method") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let imm = match env.call_method(
+            &activity,
+            "getSystemService",
+            "(Ljava/lang/String;)Ljava/lang/Object;",
+            &[JValue::Object(&service_name)],
+        ).and_then(|v| v.l()) {
+            Ok(imm) => imm,
+            Err(e) => {
+                log::warn!("getSystemService error: {e}");
+                return;
+            }
+        };
+        if imm.is_null() {
+            return;
+        }
+        if let Err(e) = env.call_method(
+            &imm,
+            "toggleSoftInput",
+            "(II)V",
+            &[JValue::Int(2), JValue::Int(0)],
+        ) {
+            log::warn!("toggleSoftInput error: {e}");
+        }
+    }
+
     pub fn toggle_keyboard(app: &AndroidApp) {
-        log::info!("requesting AndroidApp::show_soft_input(false)");
-        app.show_soft_input(false);
+        show_keyboard(app);
     }
 }
 

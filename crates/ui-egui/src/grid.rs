@@ -616,7 +616,6 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     let wb: Arc<Workbook> = d.wb.clone();
     let si = wb.active_sheet();
     let Some(sh) = wb.sheet(si) else { return };
-    let sel = d.selection.clone();
     let place = (d.uid, si);
     let mut view = app.view();
     // Page Layout view: pages on a desk, rulers above and left of the headings.
@@ -686,7 +685,28 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     }
     // A one-finger touch drag pans the sheet, the content following the finger; it doesn't select.
     // (Two fingers pinch-zoom through `zoom_delta` above.)
-    if resp.drag_started() && ui.input(|i| i.any_touches()) {
+    // Header drags (column/row resizing & selection) and selection handle drags must NEVER touch-pan!
+    let origin = ui.input(|i| i.pointer.press_origin());
+    let geo_now = make_geo(app, view.scroll);
+    let in_headers = origin.is_some_and(|p| {
+        let mp = geo_now.mirror_pos(p);
+        mp.y < geo_now.cells.top() || mp.x < geo_now.cells.left()
+    });
+    let sel = app.session.active().map(|d| d.selection.clone()).unwrap_or_default();
+    let cur_rect = geo_now.range_rect(sh, sel.current());
+    let handle = Rect::from_center_size(cur_rect.right_bottom(), vec2(20.0, 20.0));
+    let on_selection_control = origin.is_some_and(|p| {
+        let mp = geo_now.mirror_pos(p);
+        handle.contains(mp) || on_border(cur_rect, mp)
+    });
+
+    if resp.drag_started()
+        && ui.input(|i| i.any_touches())
+        && !in_headers
+        && !on_selection_control
+        && !app.grid.drag_select
+        && app.grid.drag == Drag::None
+    {
         app.grid.touch_pan = true;
     }
     if app.grid.touch_pan && resp.dragged() && ui.input(|i| i.multi_touch().is_none()) {
@@ -2149,8 +2169,8 @@ fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &
     // Hit-testing works in logical coordinates (see `Geo::rtl`).
     let pos = pointer.interact_pos().or(pointer.hover_pos()).map(|p| geo.mirror_pos(p));
     let in_cells = pos.is_some_and(|p| geo.in_cells(p));
-    let in_col_header = pos.is_some_and(|p| p.y < geo.cells.top() && p.y >= geo.head_top() && p.x >= geo.cells.left());
-    let in_row_header = pos.is_some_and(|p| p.x < geo.cells.left() && p.x >= geo.head_left() && p.y >= geo.cells.top());
+    let in_col_header = pos.is_some_and(|p| p.y < geo.cells.top() + 8.0 && p.y >= geo.head_top() - 6.0 && p.x >= geo.cells.left());
+    let in_row_header = pos.is_some_and(|p| p.x < geo.cells.left() + 8.0 && p.x >= geo.head_left() - 6.0 && p.y >= geo.cells.top());
     let in_corner = pos.is_some_and(|p| p.x < geo.cells.left() && p.y < geo.cells.top() && p.x >= geo.head_left() && p.y >= geo.head_top());
     let sel = app.session.active().map(|d| d.selection.clone()).unwrap_or_default();
     let cur_rect = geo.range_rect(sh, sel.current());
@@ -2706,9 +2726,10 @@ fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &
 
     // Right-click / Long-press: context menu (including right press that wobbles into a drag or touch hold).
     let secondary_drag = resp.drag_started_by(egui::PointerButton::Secondary);
+    let wobble = pointer.press_origin().zip(pointer.latest_pos()).map(|(o, l)| (o - l).length()).unwrap_or(0.0);
     let long_pressed = pointer.primary_down()
-        && !resp.dragged()
-        && pointer.press_start_time().is_some_and(|t| ctx.input(|i| i.time) - t > 0.55);
+        && wobble < 24.0
+        && pointer.press_start_time().is_some_and(|t| ctx.input(|i| i.time) - t > 0.45);
     if (resp.secondary_clicked() || secondary_drag || long_pressed)
         && let Some(p) = if secondary_drag { pointer.press_origin().map(|p| geo.mirror_pos(p)).or(pos) } else { pos }
     {
@@ -2939,11 +2960,11 @@ fn paint_freeze_handles(p: &Painter, geo: &Geo, sh: &Sheet, drag: &Drag, t: &Tok
 
 fn col_edge(geo: &Geo, sh: &Sheet, x: f32) -> Option<(u32, f32)> {
     let c = geo.col_at(sh, x);
-    let tol = (10.0 * geo.z).clamp(8.0, 14.0);
+    let tol = (12.0 * geo.z).clamp(10.0, 20.0);
     for cc in [c, c.saturating_sub(1)] {
         let edge = geo.x(sh, cc) + sh.col_width(cc) * geo.z;
-        let max_tol = (sh.col_width(cc) * geo.z * 0.35).min(tol);
-        if (x - edge).abs() <= max_tol.max(4.0) {
+        let max_tol = (sh.col_width(cc) * geo.z * 0.45).min(tol);
+        if (x - edge).abs() <= max_tol.max(6.0) {
             return Some((cc, edge));
         }
     }
@@ -2952,11 +2973,11 @@ fn col_edge(geo: &Geo, sh: &Sheet, x: f32) -> Option<(u32, f32)> {
 
 fn row_edge(geo: &Geo, sh: &Sheet, y: f32) -> Option<(u32, f32)> {
     let r = geo.row_at(sh, y);
-    let tol = (10.0 * geo.z).clamp(8.0, 14.0);
+    let tol = (12.0 * geo.z).clamp(10.0, 20.0);
     for rr in [r, r.saturating_sub(1)] {
         let edge = geo.y(sh, rr) + sh.row_height(rr) * geo.z;
-        let max_tol = (sh.row_height(rr) * geo.z * 0.35).min(tol);
-        if (y - edge).abs() <= max_tol.max(3.0) {
+        let max_tol = (sh.row_height(rr) * geo.z * 0.45).min(tol);
+        if (y - edge).abs() <= max_tol.max(5.0) {
             return Some((rr, edge));
         }
     }
@@ -4055,7 +4076,8 @@ fn header_menu(app: &mut SheetApp, ui: &mut egui::Ui, was_open: bool) {
             }
         });
     });
-    if close || popup_dismissed(&response.response, was_open) {
+    let opened_now = app.grid.context_menu_frame == ui.ctx().cumulative_frame_nr();
+    if close || (!opened_now && popup_dismissed(&response.response, was_open)) {
         app.grid.header_menu = None;
     }
 }
