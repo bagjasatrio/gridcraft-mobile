@@ -29,6 +29,8 @@
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-147a40?style=flat-square">
   <img alt="Agent-drivable over MCP" src="https://img.shields.io/badge/agents-MCP-1f9d55?style=flat-square">
   <br>
+  <a href="https://github.com/bagjasatrio/gridcraft-mobile/releases/download/v0.12.1-mobile/GridCraft-Mobile-v0.12.1.apk"><img alt="Download Android APK" src="https://img.shields.io/badge/%F0%9F%93%B1%20Download%20Android%20APK-v0.12.1%20Release%20(28%20MB)-04D361?style=for-the-badge&logo=android&logoColor=white"></a>
+  <br>
   <a href="https://sonarcloud.io/project/overview?id=storytold_gridcraft"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
   <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/storytold/gridcraft?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
 </p>
