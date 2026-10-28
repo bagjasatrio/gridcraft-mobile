@@ -46,3 +46,9 @@ Generated-in-code art is original and has no file to list: the UI icon set (`cra
 | `docs/images/pivot.png` | GridCraft contributors | screenshot of GridCraft rendered offscreen (`crates/ui-egui/examples/snapshot.rs`) showing an original sample workbook | MIT OR Apache-2.0 | README screenshot; no third-party content |
 | `docs/images/format-chart.png` | GridCraft contributors | screenshot of GridCraft rendered offscreen (`crates/ui-egui/examples/snapshot.rs`) showing an original sample workbook | MIT OR Apache-2.0 | README screenshot; no third-party content |
 | `docs/images/page-break.png` | GridCraft contributors | screenshot of GridCraft rendered offscreen (`crates/ui-egui/examples/snapshot.rs`) showing an original sample workbook | MIT OR Apache-2.0 | README screenshot; no third-party content |
+| `apps/gridcraft-android-spike/res/drawable/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (512x512) |
+| `apps/gridcraft-android-spike/res/mipmap-mdpi/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (48x48) |
+| `apps/gridcraft-android-spike/res/mipmap-hdpi/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (72x72) |
+| `apps/gridcraft-android-spike/res/mipmap-xhdpi/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (96x96) |
+| `apps/gridcraft-android-spike/res/mipmap-xxhdpi/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (144x144) |
+| `apps/gridcraft-android-spike/res/mipmap-xxxhdpi/ic_launcher.png` | GridCraft contributors | Rendered from `assets/app-icon/gridcraft-1024.png` | MIT OR Apache-2.0 | Android app icon (192x192) |
