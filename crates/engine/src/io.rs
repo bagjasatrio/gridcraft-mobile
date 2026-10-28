@@ -606,6 +606,7 @@ fn script_sandbox_check(path: &str) -> Result<()> {
 
 /// The largest native file the reader still touches: its own cap plus one, used to stop
 /// reads whose bytes arrive faster than metadata can claim (device files, growing files).
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -652,7 +653,9 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
         opts.mode(p.mode());
     }
     let mut f = opts.open(&tmp).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
+        // Do NOT remove `tmp` on open failure: if `create_new(true)` failed because `tmp`
+        // already exists (e.g. a symlink or file planted by another user), removing it would
+        // destroy someone else's file.
         EngineError::Other(format!("{path}: {e}"))
     })?;
     #[cfg(not(unix))]
@@ -766,6 +769,7 @@ mod tests {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
     #[test]
     fn save_fails_upfront_when_the_temp_name_is_taken() {
         // Another local user who can write the directory must not be able to point the
@@ -780,6 +784,22 @@ mod tests {
         let err = write_file(dest.to_str().unwrap(), b"new").unwrap_err();
         assert_eq!(std::fs::read(&victim).unwrap(), b"original");
         assert!(!dir.join("book.xlsx").exists(), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn save_does_not_destroy_preexisting_temp_file() {
+        let dir = std::env::temp_dir().join(format!("gridcraft-fs-safety-no-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("book.xlsx.sctmp");
+        std::fs::write(&tmp, b"dont_delete_me").unwrap();
+        let dest = dir.join("book.xlsx");
+        let err = write_file(dest.to_str().unwrap(), b"new").unwrap_err();
+        assert!(tmp.exists(), "existing temp file must not be deleted on open failure: {err}");
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"dont_delete_me");
+        assert!(!dest.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

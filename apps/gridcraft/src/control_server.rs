@@ -22,6 +22,8 @@ use serde_json::{Value as Json, json};
 const MAX_LINE: usize = 64 * 1024 * 1024;
 /// How long a new connection may take to send its token.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum concurrent active control connections to prevent thread-exhaustion DoS.
+const MAX_CONCURRENT_CONNS: usize = 32;
 
 /// The secret of this run: the one the user chose (`--control-token`, `GRIDCRAFT_CONTROL_TOKEN`),
 /// else 256 random bits from the operating system, written to a file only the user can read.
@@ -52,12 +54,28 @@ pub fn start(port: u16, chosen_token: Option<String>, ctx: egui::Context) -> std
 /// Accept connections on `listener`; requests arrive on the returned receiver.
 fn serve_listener(listener: TcpListener, token: Arc<str>, ctx: egui::Context) -> std::io::Result<Receiver<ControlRequest>> {
     let (tx, rx) = channel();
+    let conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     std::thread::Builder::new().name("control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
+            if conns.load(std::sync::atomic::Ordering::Relaxed) >= MAX_CONCURRENT_CONNS {
+                log::warn!("control channel: dropping connection (reached max concurrent connections of {MAX_CONCURRENT_CONNS})");
+                continue;
+            }
+            conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let tx = tx.clone();
             let ctx = ctx.clone();
             let token = Arc::clone(&token);
-            let _ = std::thread::Builder::new().name("control-conn".into()).spawn(move || serve(stream, &token, tx, ctx));
+            let conns_counter = Arc::clone(&conns);
+            let _ = std::thread::Builder::new().name("control-conn".into()).spawn(move || {
+                struct ConnGuard(Arc<std::sync::atomic::AtomicUsize>);
+                impl Drop for ConnGuard {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let _guard = ConnGuard(conns_counter);
+                serve(stream, &token, tx, ctx);
+            });
         }
     })?;
     Ok(rx)

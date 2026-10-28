@@ -270,9 +270,8 @@ fn collect_inputs(inputs: &[String]) -> Discovery {
 
 /// Returns false only when the global file budget stops traversal.
 fn walk(dir: &Path, depth: usize, out: &mut Discovery, seen: &mut std::collections::HashSet<u64>) -> bool {
-    // A directory is visited once by identity (dev+inode on unix): several links to the same
-    // directory are aliases, not exponential branches of the scan. Other platforms keep the
-    // depth cap only.
+    // A directory is visited once by identity (dev+inode on unix, canonical path hash on others):
+    // several links to the same directory are aliases, not exponential branches of the scan.
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
@@ -281,6 +280,17 @@ fn walk(dir: &Path, depth: usize, out: &mut Discovery, seen: &mut std::collectio
             && !seen.insert(id)
         {
             return true;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        use std::hash::{Hash as _, Hasher as _};
+        if let Ok(canon) = std::fs::canonicalize(dir) {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            canon.hash(&mut hasher);
+            if !seen.insert(hasher.finish()) {
+                return true;
+            }
         }
     }
     if depth > MAX_DEPTH {
